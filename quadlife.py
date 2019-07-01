@@ -1,5 +1,5 @@
 from queue import Queue
-from random import randint, choice, shuffle
+from random import randint, choice
 
 import pygame
 
@@ -27,29 +27,46 @@ class LifeMap:
                     self.alive[x][y] = False
 
 
-def carve_cavern(grid, caverns):
+def carve_tile_sets(grid, tile_sets):
     """
-    Sets each point in a list of cavern coordinates as False
+    Sets each point in a list of lists of tile coordinates as False
+    :param grid: current 2d boolean array
+    :param tile_sets: list of list of tuples representing unconnected caverns
+    :return: modified grid
+    """
+    for tile_set in tile_sets:
+        grid = carve_tiles(grid=grid, tiles=tile_set)
+    return grid
+
+
+def carve_tiles(grid, tiles):
+    """
+    Sets each point in a list of lists of tile coordinates as False
+    :param grid: current 2d boolean array
+    :param tiles: list of tuples representing unconnected caverns
+    :return: modified grid
+    """
+    for (x, y) in tiles:
+        grid.alive[x][y] = False
+    return grid
+
+
+def connect_caverns(tile_sets):
+    """
     Chooses a random coordinate in each separate cavern set,
     and then connects those points in a random-walk algorithm,
     setting to false as it progresses
-    :param grid: current 2d boolean array
-    :param caverns: list of list of tuples representing unconnected caverns
-    :return: modified grid, and list of corridor coordinates
-    TODO should probably move random walk to another method
+    :param tile_sets: list of list of tuples representing unconnected caverns
+    :return: list of tuple int x y coordinates
     """
-    connections_start = []
-    connections_end = []
-    for tile_set in caverns:
-        for tile in tile_set:
-            (x, y) = tile
-            grid.alive[x][y] = False
-        connections_start.append(choice(tile_set))
-        connections_end.append(choice(tile_set))
     corridors = []
-    for i in range(-1, len(connections_start) - 1):
-        (x, y) = connections_start[i]
-        (x2, y2) = connections_end[i + 1]
+    connections = []
+    # get connection points for corridors
+    for tile_set in tile_sets:
+        connections.append(choice(tile_set))
+    for i in range(-1, len(connections) - 2):
+        (x, y) = connections[i]
+        (x2, y2) = connections[i + 1]
         while (x, y) != (x2, y2):
             if x == x2:  # move y
                 if y < y2:
@@ -72,9 +89,8 @@ def carve_cavern(grid, caverns):
                         x += 1
                     else:
                         x -= 1
-            grid.alive[x][y] = False
             corridors.append((x, y))
-    return grid, corridors
+    return corridors
 
 
 def cleanup(grid, min_cavern_size):
@@ -82,7 +98,7 @@ def cleanup(grid, min_cavern_size):
     Create a map without the small caverns, with all valid caverns connected
     :param grid: current 2d boolean array
     :param min_cavern_size: int minimum size of unconnected
-    :return: modified copy of grid, list of corridors
+    :return: modified copy of grid, list of lists of tuple int x y coordinates
     """
     new_grid = LifeMap(map_width=grid.width, map_height=grid.height)
     # copy grid
@@ -92,9 +108,9 @@ def cleanup(grid, min_cavern_size):
                 new_grid.alive[x][y] = False
     
     # get a map without the small caverns, with all valid caverns connected
-    new_grid, corridors = fill_small_caverns(grid=new_grid, min_cavern_size=min_cavern_size)
+    new_grid, valid_caverns = fill_small_caverns(grid=new_grid, min_cavern_size=min_cavern_size)
     
-    return new_grid, corridors
+    return new_grid, valid_caverns
 
 
 def fill_small_caverns(grid, min_cavern_size):
@@ -102,9 +118,9 @@ def fill_small_caverns(grid, min_cavern_size):
     Finds the coordinates of all enclosed caverns, sends only valid caverns to be carved
     :param grid: current LifeMap object
     :param min_cavern_size: int minimum cavern size to keep
-    :return: current lifeMap object
+    :return: current lifeMap object, list of lists of tuple int x y locations
     """
-    cavern_tiles = []  # holds set of all coordinates in largest caverns found so far
+    cavern_tiles = []  # holds sets of all coordinates in largest caverns found so far
     explored = []
     new_grid = LifeMap(map_width=grid.width, map_height=grid.height)
     for x in range(new_grid.width):
@@ -116,8 +132,23 @@ def fill_small_caverns(grid, min_cavern_size):
                 explored.extend(new_cave_tiles)
                 if len(new_cave_tiles) >= min_cavern_size:
                     cavern_tiles.append(new_cave_tiles)
-    new_map, corridors = carve_cavern(grid=new_grid, caverns=cavern_tiles)
-    return new_map, corridors
+    new_map = carve_tile_sets(grid=new_grid, tile_sets=cavern_tiles)
+    return new_map, cavern_tiles
+
+
+def get_starting_seeds(caverns, min_cavern_size, zone_seed_min_distance):
+    seeds = []
+    for tile_set in caverns:
+        valid_seeds = tile_set
+        cavern_seed_count = len(tile_set) // min_cavern_size
+        
+        while valid_seeds and len(valid_seeds) >= cavern_seed_count:
+            seed = choice(valid_seeds)
+            seeds.append(seed)
+            valid_seeds.remove(seed)
+            valid_seeds = remove_closest_candidates(seed=seed, candidates=valid_seeds,
+                                                    zone_seed_min_distance=zone_seed_min_distance)
+    return seeds
 
 
 def get_neighbor_count(grid, x, y, state):
@@ -250,48 +281,19 @@ def cycle(grid, survive_min, survive_max, resurrect_min, resurrect_max):
     return next_grid
 
 
-def make_zones(grid, desired_seeds, zone_seed_min_distance):
+def make_zones(grid, starting_seeds):
     """
     Creates zones to be used for monster / treasure placement (instead of rooms)
     :param grid: LifeMap object
-    :param desired_seeds: number of desired zones (more of a guideline)
-    :param zone_seed_min_distance: int minimum orthogonal distance between seeds
+    :param starting_seeds: list of tuple int x y coordinates (one from each "cavern")
     :return: list of lists of tuple int x y coordinates
-    TODO this should probably be split into other methods
     """
     # copy map
     taken_grid = LifeMap(grid.width, grid.height)
     for x in range(grid.width):
         for y in range(grid.height):
-            if not grid.alive[x][y]:
+            if not grid.alive[x][y] or (x, y) in starting_seeds:
                 taken_grid.alive[x][y] = False
-    
-    # prepare a list of seed candidates that have no "live" neighbors on the grid, and are not next to a seed
-    candidates = []
-    for x in range(1, taken_grid.width - 2):
-        for y in range(1, taken_grid.height - 2):
-            if not taken_grid.alive[x][y] and get_neighbor_count_ortho(taken_grid, x, y, False) == 4:
-                candidates.append((x, y))
-                taken_grid.alive[x][y] = True
-    
-    # determine seeds to grow zones
-    seeds = []
-    if len(candidates) < desired_seeds:
-        seeds = candidates
-    else:
-        # create initial seed
-        shuffle(candidates)
-        seed = (candidates[0])
-        seeds.append(seed)
-        candidates.remove(seed)
-        candidates = remove_closest_candidates(seed, candidates, zone_seed_min_distance)
-        # create seeds until there are no valid candidates, or there are enough seeds
-        while candidates and len(seeds) < desired_seeds:
-            furthest = furthest_candidate_from_all_seeds(seeds=seeds, candidates=candidates)
-            seeds.append(furthest)
-            candidates.remove(furthest)
-            candidates = remove_closest_candidates(seed=furthest, candidates=candidates,
-                                                   zone_seed_min_distance=zone_seed_min_distance)
     
     # convert lifeMap object into a list of valid coordinates
     grid_list = []
@@ -302,7 +304,7 @@ def make_zones(grid, desired_seeds, zone_seed_min_distance):
     
     # change list of seed tuples into a list of lists
     zones = []
-    for seed in seeds:
+    for seed in starting_seeds:
         zones.append([seed])
     
     # grow seeds into zones, until there are no more valid coordinates to choose from
@@ -316,9 +318,9 @@ def grow_zones(zones, grid_list, grid):
     """
     Iterate through zones tile by tile, appending each tile's valid neighbors to it's zone
     :param zones: list of lists of tuple int x y coordinates
-    :param grid_list: LifeMap object (array of array of booleans)
-    :param grid:
-    :return:
+    :param grid_list: list of available tiles
+    :param grid: LifeMap object (array of array of booleans)
+    :return: new list of zones, list of valid coordinates
     """
     zone_list = []
     for zone in zones:
@@ -390,7 +392,7 @@ def distance_to(x1, y1, x2, y2):
 def draw_display(display, corridors, block_size, zones=None):
     block = pygame.Surface((block_size, block_size))
     small_block = pygame.Surface((block_size // 2, block_size // 2))
-    small_block.fill((255, 255, 255))
+    small_block.fill((0, 0, 0))
     
     display.fill((0, 0, 0))
     for zone in zones:
@@ -399,8 +401,13 @@ def draw_display(display, corridors, block_size, zones=None):
             block.fill(color)
             display.blit(block, (x * block_size, y * block_size))
             if (x, y) in corridors:
-                small_block.fill((255, 255, 255))
+                corridors.remove((x, y))
                 display.blit(small_block, (x * block_size + block_size // 4, y * block_size + block_size // 4))
+    
+    block.fill((255, 255, 255))
+    for (x, y) in corridors:
+        display.blit(block, (x * block_size, y * block_size))
+        display.blit(small_block, (x * block_size + block_size // 4, y * block_size + block_size // 4))
 
 
 def main():
@@ -418,17 +425,17 @@ def main():
     # Conway's Game Of Life variables
     # 3 6 5 6 3 - good choice
     # 3 6 5 7 3 - another good choice
+    # 3 5 5 6 4 - larger, more open
     survive_min = 3
     survive_max = 6
     resurrect_min = 5
-    resurrect_max = 6
-    iterations = 5
-
+    resurrect_max = 7
+    iterations = 4
+    
     # zone variables
-    zone_seed_min_distance = 12
-    num_zone_seeds = map_width * map_height // 100
-    min_cavern_size = 15
-
+    zone_seed_min_distance = 10
+    min_cavern_size = 20
+    
     game_quit = False
     
     while not game_quit:
@@ -443,12 +450,19 @@ def main():
         for i in range(iterations):
             life_map = cycle(grid=life_map, survive_min=survive_min, survive_max=survive_max,
                              resurrect_min=resurrect_min, resurrect_max=resurrect_max)
-            
-        # clean up LifeMap object, connecting areas that are large enough
-        life_map, corridors = cleanup(grid=life_map, min_cavern_size=min_cavern_size)
         
-        # create zones (rooms) in map for monster/tresure placement
-        zones = make_zones(grid=life_map, desired_seeds=num_zone_seeds, zone_seed_min_distance=zone_seed_min_distance)
+        # clean up LifeMap object, connecting areas that are large enough
+        life_map, caverns = cleanup(grid=life_map, min_cavern_size=min_cavern_size)
+        
+        starting_seeds = get_starting_seeds(caverns=caverns, min_cavern_size=min_cavern_size,
+                                            zone_seed_min_distance=zone_seed_min_distance)
+        
+        # create zones (rooms) in map for monster/treasure placement
+        zones = make_zones(grid=life_map, starting_seeds=starting_seeds)
+        
+        # connect_zones
+        corridors = connect_caverns(tile_sets=caverns)
+        # life_map = carve_tiles(grid=life_map, tiles=corridors)
         
         # display result
         draw_display(display=display, corridors=corridors, block_size=block_size, zones=zones)
