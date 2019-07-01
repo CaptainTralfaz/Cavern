@@ -265,8 +265,8 @@ def cycle(grid, survive_min, survive_max, resurrect_min, resurrect_max):
     :return: current lifeMap object after iteration
     """
     next_grid = LifeMap(map_width=grid.width, map_height=grid.height)
-    for x in range(1, grid.width - 2):
-        for y in range(1, grid.height - 2):
+    for x in range(1, grid.width - 1):
+        for y in range(1, grid.height - 1):
             neighbor_count = get_neighbor_count(grid=grid, x=x, y=y, state=True)
             if grid.alive[x][y]:
                 if survive_min <= neighbor_count <= survive_max:
