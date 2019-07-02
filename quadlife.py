@@ -2,6 +2,7 @@ from queue import Queue
 from random import randint, choice
 
 import pygame
+from pygame.locals import *
 
 life_directions = {(-1, -1), (-1, 0), (-1, 1), (0, 1),
                    (1, 1), (1, 0), (1, -1), (0, -1)}
@@ -51,46 +52,93 @@ def carve_tiles(grid, tiles):
     return grid
 
 
-def connect_caverns(tile_sets):
+def connect_caverns_closest(grid, caverns, min_cavern_size):
+    """
+    Connect caverns using closest tiles rather than random tiles
+     - strategy: sort the caverns smallest to largest
+     - start with the smallest cavern
+     - flood fill neighboring WALLS until a FLOOR neighbor is detected that is NOT part of current cavern
+     - THAT floor neighbor is the closest point
+     - check point against original cavern tile points for distance set of smallest distances
+     - choose one of those closest points to connect to
+     - repeat for next largest cavern (re-sort caverns) until there is only one cavern
+    :param grid: current LifeMap Object
+    :param caverns: list of list of tuples representing unconnected caverns
+    :param min_cavern_size: int minimum number of tiles in a cavern
+    :return: list of tuple int x y coordinates (corridors)
+    """
+    all_corridors = []
+    while len(caverns) > 1:
+        caverns.sort(key=len)
+        closest = explore_walls_iterative_ortho(grid, caverns[0])
+        target = find_nearest_point_in_cavern(closest, caverns[0])
+        corridors = connect_caverns_random_walk(closest, target)
+        all_corridors.extend(corridors)
+        carve_tiles(grid=grid, tiles=corridors)
+        
+        # get new list of caverns
+        grid, caverns = fill_small_caverns(grid=grid, min_cavern_size=min_cavern_size)
+    
+    return all_corridors
+
+
+def connect_caverns_random_walk(closest, target):
     """
     Chooses a random coordinate in each separate cavern set,
     and then connects those points in a random-walk algorithm,
     setting to false as it progresses
-    :param tile_sets: list of list of tuples representing unconnected caverns
-    :return: list of tuple int x y coordinates
+    :param closest: tuple representing starting point of walk
+    :param target: tuple representing ending point of walk
+    :return: list of tuple int x y coordinates (corridors)
     """
     corridors = []
-    connections = []
-    # get connection points for corridors
-    for tile_set in tile_sets:
-        connections.append(choice(tile_set))
-    for i in range(-1, len(connections) - 2):
-        (x, y) = connections[i]
-        (x2, y2) = connections[i + 1]
-        while (x, y) != (x2, y2):
-            if x == x2:  # move y
-                if y < y2:
-                    y += 1
-                else:
-                    y -= 1
-            elif y == y2:  # move x
-                if x < x2:
-                    x += 1
-                else:
-                    x -= 1
+    (x1, y1) = closest
+    (x2, y2) = target
+    while (x1, y1) != (x2, y2):
+        if x1 == x2:  # move y
+            if y1 < y2:
+                y1 += 1
             else:
-                if randint(0, 1):  # randomly pick x or y
-                    if y < y2:
-                        y += 1
-                    else:
-                        y -= 1
+                y1 -= 1
+        elif y1 == y2:  # move x
+            if x1 < x2:
+                x1 += 1
+            else:
+                x1 -= 1
+        else:
+            if randint(0, 1):  # randomly pick x or y
+                if y1 < y2:
+                    y1 += 1
                 else:
-                    if x < x2:
-                        x += 1
-                    else:
-                        x -= 1
-            corridors.append((x, y))
+                    y1 -= 1
+            else:
+                if x1 < x2:
+                    x1 += 1
+                else:
+                    x1 -= 1
+        corridors.append((x1, y1))
+    corridors.remove(target)
     return corridors
+
+
+def find_nearest_point_in_cavern(start, cavern):
+    """
+    compare orthogonal distances between a point and a set of another points to find closest
+    :param start: tile coordinates
+    :param cavern: list of tiles in a cavern
+    :return: target coordinate
+    """
+    target = cavern[0]
+    (x1, y1) = start
+    (x2, y2) = target
+    cavern.remove(target)
+    shortest_dist = distance_to(x1=x1, y1=y1, x2=x2, y2=y2)
+    for (x2, y2) in cavern:
+        distance = distance_to(x1=x1, y1=y1, x2=x2, y2=y2)
+        if distance < shortest_dist:
+            shortest_dist = distance
+            target = (x2, y2)
+    return target
 
 
 def cleanup(grid, min_cavern_size):
@@ -137,10 +185,21 @@ def fill_small_caverns(grid, min_cavern_size):
 
 
 def get_starting_seeds(caverns, min_cavern_size, zone_seed_min_distance):
+    """
+    Create starting zone seeds with the following strategy:
+    1 determine maximum number of possible seeds
+    2 pick a random tile in a cave as a seed
+    3 remove all other tiles within a certain distance as seed candidates
+    4 repeat 2 and 3 until there are no valid candidates
+    :param caverns: list of lists of cavern tiles
+    :param min_cavern_size: helps determine maximum number of seeds
+    :param zone_seed_min_distance:
+    :return: list of seed coordinates
+    """
     seeds = []
-    for tile_set in caverns:
-        valid_seeds = tile_set
-        cavern_seed_count = len(tile_set) // min_cavern_size
+    for cavern in caverns:
+        valid_seeds = cavern
+        cavern_seed_count = len(cavern) // min_cavern_size
         
         while valid_seeds and len(valid_seeds) >= cavern_seed_count:
             seed = choice(valid_seeds)
@@ -251,6 +310,41 @@ def explore_cavern_iterative_ortho(grid, x, y):
                 frontier.put(neighbor)
                 visited.append(neighbor)
     return visited
+
+
+def explore_walls_iterative_ortho(grid, tile_set):
+    """
+    Iteratively explores walls from a set of points,
+     - returns a list of all coordinates in that cavern - orthogonal version
+    :param grid: LifeMap object
+    :param tile_set: list of tuple int x y coordinates
+    :return: closest "live" coordinates of next cave
+    """
+    frontier = Queue()
+    visited = []
+    closest = None
+    
+    for (x, y) in tile_set:
+        visited.append((x, y))
+        if get_neighbors_list_ortho(grid, x, y, state=True):
+            frontier.put((x, y))
+    while not frontier.empty() and not closest:
+        current = frontier.get()
+        x, y = current
+        neighbors = []
+        for (dx, dy) in ortho_directions:
+            if (x + dx) in range(0, grid.width) and (y + dy) in range(0, grid.height):
+                neighbors.append((x + dx, y + dy))
+        for neighbor in neighbors:
+            (x, y) = neighbor
+            if (x, y) not in visited:
+                if grid.alive[x][y]:
+                    frontier.put(neighbor)
+                    visited.append(neighbor)
+                else:
+                    closest = (x, y)
+                    break
+    return closest
 
 
 def cycle(grid, survive_min, survive_max, resurrect_min, resurrect_max):
@@ -396,9 +490,9 @@ def draw_display(display, corridors, block_size, zones=None):
     
     display.fill((0, 0, 0))
     for zone in zones:
-        color = (randint(50, 255), randint(50, 255), randint(50, 255))
+        random_color = (randint(50, 255), randint(50, 255), randint(50, 255))
+        block.fill(random_color)
         for (x, y) in zone:
-            block.fill(color)
             display.blit(block, (x * block_size, y * block_size))
             if (x, y) in corridors:
                 corridors.remove((x, y))
@@ -460,8 +554,11 @@ def main():
         # create zones (rooms) in map for monster/treasure placement
         zones = make_zones(grid=life_map, starting_seeds=starting_seeds)
         
+        # connect zones
+        corridors = connect_caverns_closest(grid=life_map, caverns=caverns, min_cavern_size=min_cavern_size)
+        
         # connect_zones
-        corridors = connect_caverns(tile_sets=caverns)
+        # corridors = connect_caverns_random_walk(tile_set=caverns)
         # life_map = carve_tiles(grid=life_map, tiles=corridors)
         
         # display result
@@ -472,7 +569,7 @@ def main():
         while stop and not game_quit:
             event_list = pygame.event.get()
             for event in event_list:
-                if event.type == pygame.KEYDOWN:
+                if event.type == pygame.KEYDOWN and event.key == K_SPACE:
                     stop = False
                 
                 elif event.type == pygame.QUIT:
